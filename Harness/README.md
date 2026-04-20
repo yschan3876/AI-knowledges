@@ -7,6 +7,7 @@
 | 文档 | 主题 | 来源 |
 |------|------|------|
 | [Harness Design for Long-Running Apps](./harness-design-long-running-apps.md) | 多 Agent 架构、Context 管理、Sprint Contract、Load-Bearing 分析 | [Anthropic Engineering Blog](https://www.anthropic.com/engineering/harness-design-long-running-apps) |
+| [为什么"AI-First"战略大概率是错的](./why-ai-first-strategy-is-probably-wrong.md) | AI-First 认知误区、Harness Engineering 本质、自愈式反馈闭环、组织角色重塑 | Monica AI 分析报告整理 |
 
 ---
 
