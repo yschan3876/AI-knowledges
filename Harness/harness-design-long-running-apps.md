@@ -1,377 +1,294 @@
-# Harness Design for Long-Running Apps — 学习笔记
+# 《Harness Design for Long-Running Application Development》｜思维导图 + 读书笔记
 
-## 内容概览
-
-- **作者**：Prithvi Rajasekaran（Anthropic Labs）
-- **来源**：[Anthropic Engineering Blog](https://www.anthropic.com/engineering/harness-design-long-running-apps)
-- **类型**：技术实践文章（一手工程经验）
-- **学习日期**：2026-04-16 ~ 2026-04-17
-- **学习方式**：苏格拉底式深度阅读（socratic-reader skill）
-
-### 核心主旨
-
-围绕 LLM 自主编程的两大结构性瓶颈（**Context 退化** + **自评估失效**），设计出 GAN 启发的多 Agent Harness 架构，并随模型能力演进**持续迭代简化**。核心信念：Harness 组合空间不会随模型改进而缩小，只是移动了——AI 工程师的价值在于不断寻找下一个新颖组合。
+> **作者**：Prithvi Rajasekaran（Anthropic Labs）｜ **来源**：[anthropic.com/engineering](https://www.anthropic.com/engineering/harness-design-long-running-apps) ｜ **阅读日期**：2026-04-20
 
 ---
 
-## 单元 1：为什么 naive 实现会失败
-
-### 核心论点
-
-朴素的单 Agent 长任务实现必然崩塌，存在两个**结构性瓶颈**——不是 prompt 写得不好，而是任务性质本身决定的。
-
-### 瓶颈一：Context Window 退化
-
-- **现象**：随着上下文窗口填满，模型的**一致性开始崩塌**
-- **Context Anxiety（上下文焦虑）**：模型感知到上下文快满时会**主动提前收尾**——不是因为任务完成，而是因为它"紧张了"
-- **两种解法**：
-
-| | Compaction（压缩） | Context Reset（重置） |
-|---|---|---|
-| **做法** | 原地总结早期对话，继续在同一会话 | 彻底清空，新 Agent 通过结构化文件接手 |
-| **优点** | 简单、连续性好 | 彻底解决焦虑，clean slate |
-| **缺点** | 焦虑严重时不够 | 编排复杂、交接成本高 |
-
-- **实测结论**：Sonnet 4.5 的 context anxiety 严重到 compaction 不够，**必须 context reset**
-
-### 瓶颈二：Self-Evaluation 失效
-
-- **现象**：Agent 评估自己时**倾向于自信地称赞自己的作品**——即使质量平庸
-- **主观任务尤其致命**（UI 设计等没有二元 pass/fail）
-- **解法**：分离 Generator 和 Evaluator
-- **关键洞察**：**分离本身不消除 LLM 的宽容倾向**，但**调教一个独立 Evaluator 变严格，比让 Generator 自省严格容易得多**
-
-### 深度讨论产出
-
-**"分离"改变了什么？** 不止是上下文，至少有三层：
-1. **上下文层**：去掉决策痕迹，消除自我一致性偏差
-2. **Prompt 层**：可以给 Evaluator 专门为"挑剔"优化的 system prompt
-3. **角色层**：创造了**对抗结构**——单 Agent 自评估是"法官审自己的案子"，双 Agent 是"控辩分离"
-
-**Context Anxiety 与 DDL 效应的类比**：
-- **行为表现相似**：都在"时间/资源快耗尽"时降低标准、草草收尾
-- **机制差异**：
-  - 人的 DDL 是**有意识的取舍**——知道时间不够主动降标准
-  - Context Anxiety 是**涌现行为**——从训练数据中长对话末尾的统计模式学到
-
-### 深层启示
-
-**针对模型弱点做重度工程 vs 保持简单等模型变强**——倾向于"带保质期的工程"：
-1. "等模型变强"不是策略，是赌博——产品不能停
-2. 工程本身是认知工具——解决过程中想清楚的架构会沉淀
-3. **但必须带拆除计划**——每个组件要能回答"补偿什么弱点？还在吗？"
-
----
-
-## 单元 2：GAN 启发的双 Agent 架构 + 让主观质量可评分
-
-### GAN 思想迁移
+## 一、全文思维导图
 
 ```
-Generator Agent  →  产出  →  Evaluator Agent
-      ↑                            │
-      └──── 具体可操作的反馈 ────────┘
-                 (5-15 轮迭代)
-```
-
-**关键差异**：原始 GAN 在训练阶段更新权重；Agent GAN 在**推理阶段**通过自然语言反馈更新下一轮 prompt 输入。价值相同：**把"创造"和"评判"两种认知活动在组织层面分离**。
-
-### 主观变可评分——核心方法论
-
-- **问题重新框架**：
-  - "这个设计美吗？" ❌（难回答，无参照）
-  - "这个设计符合这 4 条标准吗？" ✅（可回答，每条可打分）
-- **同一套标准同时给 Generator 和 Evaluator**——两者用同一套"语言"对话，反馈才可操作
-
-### 四项评分标准（Frontend Design）
-
-| 标准 | 考察 | 权重 |
-|------|------|------|
-| **Design quality** | 整体连贯性、独特情绪/身份 | 高 |
-| **Originality** | 刻意创意选择；**显式惩罚 AI slop**（如白卡片紫渐变） | **最高** ⭐ |
-| **Craft** | 字体层次、间距、色彩和谐——技术执行 | 中 |
-| **Functionality** | 独立于美学的可用性 | 中 |
-
-**权重设计哲学**：**重点杠杆在模型的弱项上**。Claude 在 Craft 和 Functionality 上天然够好，真正需要推动冒险的是美学决策和原创性。
-
-### 荷兰艺术博物馆案例
-
-- **第 9 轮**：干净的深色主题登陆页，精致但平庸
-- **第 10 轮**：**彻底推翻重来**——重构为 3D 空间体验（CSS perspective 房间、棋盘格地板、艺术品墙挂、门道导航）
-- **真正启示**：**当反馈系统允许"战略 pivot"时，模型会做出创造性跳跃**——前提是前面轮次没强制收敛
-
-### 设计模式产出
-
-**把"主观判断"拆解为可评分标准**的通用模式：
-- 代码 review → Coding style guide
-- 面试评估 → STAR 法 rubric
-- 产品决策 → OKR/PRD 模板
-
-**这个方法的阴暗面**：
-- 评分标准本身会**塑造结果**（作者承认："museum quality" 会把设计推向特定收敛）
-- 一旦标准固化，模型会**过拟合**
-- 创新空间被**标准本身的边界**限定
-
-**破解**：加元层面矫正机制（如 Originality 对抗"被标准驯化"）
-
-### 代码评审场景的 Criteria 推演
-
-| 标准 | 考察 | 权重 |
-|------|------|------|
-| **Correctness** | 逻辑、边界、并发、错误处理 | 中 |
-| **Craft** | 命名、分层、函数长度 | 低 |
-| **Change Minimality** | 只触达必要范围？过度重构？防御性代码？ | **高** ⭐ |
-| **Future Cost** | 6 个月后修改代价？过度抽象？ | **高** ⭐ |
-
-**对应的 AI slop**：过度工程、YAGNI 违反、把 5 行改动写成 200 行的"清理"。
-
-### 评估语言本身的训练污染
-
-模型对代码的 AI slop 评价（如"代码完美、没有问题、全部执行通过"）源于**训练数据本身就扭曲**：
-- Code review 评论大多是 "LGTM"、"Nice!"
-- PR merge 很少写"这个方案的代价是……"
-- Stack Overflow 高赞回答很少说"这个方法的失败场景是……"
-
-**诚实表达是带边界的，套路话是无边界的绝对判断**。Evaluator 可以用一条规则抓住：**任何不带"但是 / 除了 / 在 X 假设下"的质量声明都视为可疑**。
-
----
-
-## 单元 3：三 Agent 全栈架构 + Sprint Contract
-
-### 三 Agent 架构
-
-```
-┌─────────────┐  product spec   ┌─────────────┐  sprint contract   ┌─────────────┐
-│   Planner   │ ───────────────→│  Generator  │ ←─────────────────→│  Evaluator  │
-└─────────────┘                  └─────────────┘                    └─────────────┘
-  1-4 句 prompt                  一次一个 feature                    Playwright 交互
-  → 完整 spec                     sprint by sprint                   打分 + 阈值
-```
-
-### Planner 的反直觉设计
-
-- **关键坑**：Planner 过度指定技术细节时，错误会**级联**到下游每一行代码
-- **约束**：只规划"要什么"，不规划"怎么做"
-- **价值**：**主动雄心扩展 scope**——Generator 没 Planner 时会欠规划，直接开工产出单薄
-
-### Sprint Contract ⭐（本单元核心）
-
-每个 sprint 开始**前**，Generator 和 Evaluator 先协商 **"done 长什么样"**——**写任何代码之前**达成一致。
-
-**机制价值**：在**模糊的 Planner spec** 和 **明确的 Evaluator 评分** 之间架桥。
-
-**双向协商**：Generator 参与定义自己的成功标准，对齐两个 Agent 视角。
-
-### 文件通信机制
-
-Agent 间不对话，通过**文件**通信：
-- **异步**：不需要同步在线
-- **可审计**：人类可 inspect 每一步状态
-- **克制**：逼迫 Agent 把模糊想法**落到文档上**
-
-### 2D 游戏制作器：Solo vs Harness
-
-| | Solo | Harness |
-|---|---|---|
-| 时长 | 20 分钟 | 6 小时 |
-| 成本 | $9 | $200（22 倍） |
-| 初看 UI | 符合预期 | 画布用满视口 |
-| 深挖 | entity 无响应输入，**游戏实际坏了** | play 模式**真能玩** |
-
-**Harness 贵 22 倍换到什么**：
-1. spec 从一句话 → 10 sprints / 16 features
-2. **功能真实可用**（抓到"表面看不出"的 runtime 断线 bug）
-3. 特性丰富度（AI 辅助、可分享导出等）
-
-### Evaluator 调教反模式
-
-"Out of the box，Claude 是糟糕的 QA agent"：
-1. 先识别真 bug，再说服自己"这不是大问题"，最后批准（最阴险）
-2. 测试浅尝辄止
-3. 细微 bug 漏掉
-
-**调教循环**：读日志 → 找判断分歧 → 更新 prompt → 重复。
-
-### Sprint Contract vs 接口协议（IDL）
-
-**接口协议是 Sprint Contract 的不完整子集**：
-
-| | **接口协议** | **Sprint Contract** |
-|---|---|---|
-| 覆盖 | 数据结构 | 可测试**行为** |
-| 层次 | "返回 UserInfo" | "点击 X，300ms 内看到 toast" |
-
-**跨团队协作翻车的隐性失误**：
-1. **字段对齐，语义没对齐**（"status: 1" 两边理解不同）
-2. **成功路径定义了，异常路径没定义**（timeout 怎么办？失败文案？）
-3. **时序和性能假设隐式**（P99？QPS？）
-
-**升级版 Sprint Contract 应包含**：
-
-| 维度 | 描述 |
-|------|------|
-| 数据结构 | 字段、类型、返回码 |
-| **场景化语义** | 同一接口在不同 use case 下的入参/输出含义 |
-| **时序** | 调用时机、前置依赖、幂等性 |
-| **性能假设** | P99 延迟、最大 QPS、超时策略 |
-| **异常路径** | 失败时调用方怎么做、降级方案、兜底文案 |
-
----
-
-## 单元 4：Harness 迭代哲学 + DAW 案例
-
-### 核心原则
-
-> **"Find the simplest solution possible, and only increase complexity when needed."**
->
-> — Anthropic "Building Effective Agents"
-
-**可执行推论**：
-> 每个 Harness 组件都编码了一个关于"模型独自做不到什么"的假设。这些假设值得压力测试，因为：(1) 可能本身就不对；(2) 随着模型变强，会快速过时。
-
-**Harness 组件 = 对模型弱点的补偿机制**。弱点消失，组件变死重。
-
-### Load-Bearing 分析方法论
-
-| 方法 | 结果 |
-|------|------|
-| 激进削减：一次去掉多个组件 | ❌ 性能崩了，不知锅在哪 |
-| **一次移除一个组件（控制变量法）** | ✅ 能分辨每个组件是否 load-bearing |
-
-### Opus 4.6 带来的具体简化
-
-| 组件 | 之前为什么存在 | 4.6 之后 |
-|------|-------------|---------|
-| **Context Reset** | 对抗 context anxiety | ❌ 去掉，改连续 session + 自动 compaction |
-| **Sprint 结构** | 把工作分 chunks 让模型连贯 | ❌ 去掉，模型原生能处理长任务 |
-| **Planner** | 防止 Generator 欠规划 | ✅ **保留** |
-| **每 sprint Evaluator** | 每个 sprint 打分挂掉 | 🔄 改为 run 末尾一次性 pass |
-
-### 最重要的一句话
-
-> **"The evaluator is not a fixed yes-or-no decision. It is worth the cost when the task sits beyond what the current model does reliably solo."**
-
-**Harness 价值 = 任务难度 - 模型能力边界**。边界随版本移动，Harness 的经济性也随之变化。
-
-### DAW 案例数据
-
-V2 Harness 总计：**3h 50min / $124**（比 V1 的 6h/$200 更便宜更快）。
-
-- **Builder 连续跑 2h 7min 不需要 sprint 分解**（证明 4.6 连贯性提升）
-- **QA 第一轮仍抓到真问题**："core interactions, not edge cases"
-- **Evaluator 的能力边界**：Claude 听不到 → 音乐品味上 QA 反馈循环失效
-
-### 两类组件的微妙区分 ⭐
-
-作者保留 Planner 的理由引出一个洞察：
-
-- **补偿能力弱点的组件**（Context Reset、Sprint）→ 随模型升级**会消失**
-- **对抗行为倾向的组件**（Planner）→ 即使模型能力强了也**不自发做**
-
-**有些 Harness 组件不是为了补偿能力弱点，而是为了对抗行为倾向。前者会消失，后者长期存在。**
-
-### Key Takeaways（作者原话）
-
-1. 始终在**目标模型**上实验，读它的 traces，针对真实问题调教
-2. 复杂任务上，分解任务 + 专门 agents 仍有提升空间
-3. 新模型落地时**重新审视 Harness**：
-   - 剥离不再 load-bearing 的部件
-   - 添加新部件达成原来不可能的更高能力
-
-### 作者核心信念
-
-> **"The space of interesting harness combinations doesn't shrink as models improve. Instead, it moves, and the interesting work for AI engineers is to keep finding the next novel combination."**
-
----
-
-## AI 工程师的长期价值
-
-### 模型能力会吃掉的工作
-
-1. 大部分**编排式 Harness**（prompt chaining、固定 pipeline、手写 retry）
-2. 一部分**状态管理**（context 切换、handoff 协议）
-3. 简单场景的**一次性代码生成**
-
-### 模型能力吃不掉的工作
-
-1. **Criteria 设计** ⭐ — 定义"好"长什么样（偏好 ≠ 能力）
-2. **任务分解的判断** — 哪些任务值得 Harness、哪些不值得
-3. **评估基础设施** — trace 观察、失败模式识别、调教反馈循环
-
-### 核心认知
-
-```
-Criteria（what / why）  ←  人类定义，不可替代
-     ↓
-Model   （how）         ←  能力会越来越强
-```
-
-**AI 工程师的长期价值在于"偏好工程师"而不是"流程工程师"。**
-
-**Harness 具体配方会过期，但"怎么思考配方"不会过期。**
-
----
-
-## 概念关联图
-
-```
-Context 退化 + Self-Eval 失效
-        ↓ 解法
-GAN 启发的分离架构（Generator ⇆ Evaluator）
-        ↓ 方法论提炼
-主观变可评分（Criteria 设计 + 权重杠杆）
-        ↓ 扩展到全栈
-三 Agent 架构（加入 Planner 提高天花板）
-        ↓ 关键机制
-Sprint Contract（在 spec 和实现之间架桥）
-        ↓ 随模型演进
-Load-Bearing 分析（区分补偿能力 vs 对抗倾向的组件）
-        ↓ 长期价值
-Criteria 不会被吃掉（AI 工程师 = 偏好工程师）
+Harness Design for Long-Running Application Development
+├── 一、长任务的两大系统性失效
+│   ├── 上下文失调
+│   │   ├── 上下文窗口填满 → 任务失去连贯性
+│   │   ├── 上下文焦虑：模型提前收尾
+│   │   └── 解法：上下文重置（Context Reset）vs. 压缩（Compaction）
+│   └── 自我评估偏差
+│       ├── 模型对自身输出倾向过度正面评价
+│       ├── 主观任务中尤为严重（如设计）
+│       └── 解法：分离生成者与评估者角色
+│
+├── 二、生成-评估分离：核心方法论
+│   ├── 灵感来源：生成对抗网络（GAN）
+│   ├── 评估者独立运行 → 可被调校为"审慎怀疑"
+│   ├── 外部反馈 → 生成者有具体目标可迭代
+│   └── 主观质量 → 具体标准 → 可量化评分
+│
+├── 三、前端设计实验：主观质量的量化路径
+│   ├── 四维评分标准
+│   │   ├── 设计质量：整体感 vs. 拼凑感
+│   │   ├── 原创性：定制决策 vs. 模板/AI 默认风格
+│   │   ├── 工艺性：排版、间距、色彩对比（基线检查）
+│   │   └── 功能性：可用性与交互清晰度
+│   ├── 权重设计：设计质量 + 原创性 > 工艺性 + 功能性
+│   ├── 评估者调校：少样本示例 + 详细打分分解
+│   ├── 迭代机制：5–15 轮 × 评估驱动策略决策
+│   │   ├── 评分向好 → 精炼当前方向
+│   │   └── 评分停滞 → 切换全新美学路径
+│   └── 关键发现：标准措辞本身影响生成方向
+│
+├── 四、全栈架构：三智能体协作体系
+│   ├── Planner（规格生成者）
+│   │   ├── 将 1–4 句提示扩展为完整产品规格
+│   │   ├── 聚焦可交付物，不预设实现细节
+│   │   └── 主动寻找 AI 特性融合机会
+│   ├── Generator（功能构建者）
+│   │   ├── 按 Sprint 逐特性实现
+│   │   ├── 技术栈：React + Vite + FastAPI + SQLite
+│   │   ├── Sprint 结束后自我评估后移交 QA
+│   │   └── 拥有 Git 版本控制
+│   ├── Evaluator（质量把关者）
+│   │   ├── Playwright MCP 驱动真实用户行为测试
+│   │   ├── 四维评分 + 硬阈值机制
+│   │   └── 低于阈值 → Sprint 失败 → 返回详细反馈
+│   └── Sprint 合约机制
+│       ├── 实现前：Generator + Evaluator 协商"完成定义"
+│       ├── 产物通过文件传递（写/读/响应）
+│       └── 高层规格 → 可测试的具体行为映射
+│
+├── 五、实验结果：脚手架的价值边界
+│   ├── 对比实验（复古游戏制作器）
+│   │   ├── Solo 方案：20 分钟 / $9 / 核心功能损坏
+│   │   └── 完整 Harness：6 小时 / $200 / 完整可玩
+│   ├── 评估者的调校成本
+│   │   ├── 初期：评估者发现问题后自我说服"没关系"
+│   │   ├── 需多轮 log 分析 + Prompt 迭代
+│   │   └── 仍有上限：深层嵌套特性的 bug 会漏过
+│   └── 价值结论：评估者价值 = f(任务难度 / 模型当前能力)
+│
+└── 六、架构演化：随模型进化的假设更新
+    ├── 移除 Sprint 结构（Opus 4.6 原生具备长任务连贯性）
+    ├── 评估者从"逐 Sprint 把关" → "单次终态评审"
+    ├── DAW 实验：3小时50分 / $124
+    │   ├── 构建阶段连续运行 2+ 小时无 Sprint 分解
+    │   └── 评估者仍捕获真实功能缺口
+    └── 核心工程原则
+        ├── 每个组件都是对"模型当前能力"的假设
+        ├── 新模型落地 → 重新审视哪些组件仍是必要的
+        └── Harness 的有趣组合空间不会缩小，只会位移
 ```
 
 ---
 
-## 核心收获 Top 3
+## 二、读书笔记
 
-1. **Harness 组件 = 补偿机制 + 死期**
-   每段"绕过模型弱点"的代码应该注释 `[LOAD-BEARING | 补偿的弱点 | 移除条件]`。workaround 必须带拆除计划，否则变技术债。
+### 引言：全文定位
 
-2. **主观判断可评分化 + 权重杠杆**
-   把"好不好"拆成可编码的 criteria，同时传给 generator 和 evaluator。权重**不均匀**——重点压在"天然薄弱的维度"上推动对抗默认值。适用于代码评审、Design Doc、PRD 等所有主观任务。
-
-3. **Criteria 是偏好，不是能力**
-   长期来看，AI 工程师的价值在"定义什么是好"而不是"实现 Harness 流程"。模型能力演进会吃掉执行层，偏好层必须由人定义。
+本文处于 AI 工程实践的核心议题——如何突破单次提示的天花板，构建能在多小时自主任务中持续输出高质量结果的 Agent 系统。作者以"前端设计质量提升"和"全栈应用自主构建"两个差异极大的领域为实验场，提炼出跨领域通用的 Harness 设计方法论，并将其与模型能力演进的动态关系置于同等重要的位置加以讨论。
 
 ---
 
-## 待探索问题
+### 一、长任务的两大系统性失效
 
-1. **Sprint Contract 在非代码场景如何落地？**
-   写作、设计、产品决策等场景，contract 应该怎么表达？"可测试行为"在这些场景对应什么？
+**本节主旨**：本节是全文的问题定义层，通过解剖长任务中两种反复出现的失效模式，为后续的架构设计方案建立了理论依据。
 
-2. **Evaluator 的能力边界如何识别？**
-   作者提到"Claude 听不到"导致音乐品味失效。我们怎么在设计 Evaluator 时提前识别它的盲区？
+**展开内容**：
 
-3. **"对抗行为倾向"型 Harness 组件的识别方法**
-   怎么提前判断一个组件是补偿能力还是对抗倾向？前者会随升级消失，后者长期存在——这个区分对投资决策很关键。
+- **上下文失调（Context Degradation）**：随着上下文窗口填满，模型的任务连贯性显著下降。更棘手的是"上下文焦虑"现象——
 
-4. **Criteria 的版本化和持续演进**
-   criteria 会"驯化结果"，需要像代码一样持续演进。组织应该如何管理 criteria 的变更历史和 A/B 测试？
+  > 「Some models also exhibit "context anxiety," in which they begin wrapping up work prematurely as they approach what they believe is their context limit.」
+
+  作者区分了两种应对策略：**压缩（Compaction）** 在原有上下文基础上进行摘要，保留连续性但无法消除焦虑；**上下文重置（Context Reset）** 则清空上下文，用结构化的交接文物（handoff artifact）传递状态，以牺牲部分连续性换取干净的起点。在 Sonnet 4.5 上，仅靠压缩不足以解决问题，重置成为必要手段。
+
+- **自我评估偏差（Self-evaluation Bias）**：
+
+  > 「When asked to evaluate work they've produced, agents tend to respond by confidently praising the work—even when, to a human observer, the quality is obviously mediocre.」
+
+  这一问题在主观性任务（如设计）中尤为突出——没有二元可验证的测试等价物，模型的"乐观偏见"无法被外部约束纠正。即便在有可验证结果的任务中，模型也可能发现真实问题后又说服自己"这不算严重"而放行。
+
+**本节小结**：两大失效模式分别指向"时间维度的连贯性"与"质量维度的判断力"，为引入上下文重置与生成-评估分离奠定了问题基础。
 
 ---
 
-## 延伸阅读
+### 二、生成-评估分离：核心方法论
 
-- [Anthropic Building Effective Agents](https://www.anthropic.com/research/building-effective-agents) — 本文引用的核心原则来源
-- [Agentic Engineering Patterns 学习笔记](../AI-Agent/agentic-engineering-patterns.md) — 模式层面的总览，与本文形成互补
+**本节主旨**：本节是全文的方法论核心，提出了受 GAN 启发的生成-评估双智能体架构，解释了为何分离才能真正解决自我评估偏差。
+
+**展开内容**：
+
+- **GAN 的工程类比**：生成对抗网络中，生成器与判别器的对抗迭代使双方能力共同提升。作者将这一结构映射到 Agent 系统：Generator 负责生产，Evaluator 负责批判，两者分工明确、角色独立。
+
+- **为何分离是关键杠杆**：
+
+  > 「Tuning a standalone evaluator to be skeptical turns out to be far more tractable than making a generator critical of its own work, and once that external feedback exists, the generator has something concrete to iterate against.」
+
+  评估者的独立性使其可以被单独调校为"审慎怀疑"的模式，这在合并角色时几乎无法实现——因为生成者天然对自身产出具有保护性倾向。
+
+- **主观质量的量化路径**：
+
+  > 「'Is this design beautiful?' is hard to answer consistently, but 'does this follow our principles for good design?' gives Claude something concrete to grade against.」
+
+  将模糊的审美判断转化为具体可参照的标准，是使评估者能够有效运作的前提条件。这一认知不仅适用于设计任务，同样适用于任何存在判断自由度的场景。
+
+**本节小结**：生成-评估分离是本文所有具体实验的共同底层逻辑，后两节分别在前端和全栈领域对其进行了实例化。
 
 ---
 
-## 苏格拉底式学习元反思
+### 三、前端设计实验：主观质量的量化路径
 
-本次学习过程本身也产出了一条方法论收获，已写入 socratic-reader skill：
+**本节主旨**：本节以前端设计作为实验场，验证了"将主观判断编码为具体标准"的可行性，并揭示了评估者驱动的迭代如何突破单次生成的质量天花板。
 
-> **不迎合用户**：先给出自己独立的思考，再评价用户的回答。迎合会掏空讨论价值——用户想要的是碰撞而非点头。当用户的回答方向对但不完整时，明确指出"对但不够"的部分；当用户的类比有机制上的偏差时，指出差异而非强化相似。
+**展开内容**：
 
-这条原则本身就是本文"Evaluator 要严格、不能说服自己批准"的**元层应用**——在教学场景里，AI 导师如果自评估过宽，学生的思考深度就会停在表层。
+- **四维评分标准的设计逻辑**：作者制定了设计质量、原创性、工艺性、功能性四个维度，并对权重做出了有意识的偏置——
+
+  > 「I emphasized design quality and originality over craft and functionality. Claude already scored well on craft and functionality by default... But on design and originality, Claude often produced outputs that were bland at best.」
+
+  权重设计不是中性的，而是主动引导模型向其薄弱维度（视觉独特性）发力。
+
+- **原创性标准中的负面锚点**：标准明确将"紫色渐变叠白卡"等"AI 生成痕迹"列为失分项，通过否定典型的模型默认输出来反向定义"原创"。这种负面定义策略在 Prompt 工程中具有普遍参考价值。
+
+- **迭代机制中的策略决策**：生成者在每轮评估后需做出判断——沿现有方向精炼，还是彻底转换美学路径。这将迭代过程从机械循环升级为带有探索性质的搜索过程。
+
+- **荷兰艺术博物馆案例**：作者以此案例展示了迭代的非线性突破特征——
+
+  > 「On the tenth cycle, it scrapped the approach entirely and reimagined the site as a spatial experience: a 3D room with a checkered floor rendered in CSS perspective, artwork hung on the walls in free-form positions, and doorway-based navigation between gallery rooms.」
+
+  这种创意跳跃发生在第十轮，说明评估者的持续压力可以积累到引发质的改变，而不仅仅是量的改善。
+
+- **提示措辞的意外影响**：
+
+  > 「Including phrases like 'the best designs are museum quality' pushed designs toward a particular visual convergence, suggesting that the prompting associated with the criteria directly shaped the character of the output.」
+
+  标准的语言本身就是一种生成信号，Prompt 的措辞与评分逻辑的影响相互叠加，难以完全分离。
+
+**本节小结**：前端实验证明了评估标准的设计是 Harness 效果的核心变量，并为后续将同一方法论移植到全栈编码提供了实践依据。
+
+---
+
+### 四、全栈架构：三智能体协作体系
+
+**本节主旨**：本节是全文架构设计最密集的部分，描述了一个三智能体系统如何通过角色分工和 Sprint 合约机制，将单次提示无法完成的复杂应用开发分解为可控、可验证的工程过程。
+
+**展开内容**：
+
+- **Planner 的设计哲学**：规格生成者被要求聚焦于"交付什么"而非"如何实现"——
+
+  > 「I prompted it to be ambitious about scope and to stay focused on product context and high level technical design rather than detailed technical implementation. This emphasis was due to the concern that if the planner tried to specify granular technical details upfront and got something wrong, the errors in the spec would cascade into the downstream implementation.」
+
+  过早锁定实现细节会使规格中的错误级联扩散。高层规格 + 下游智能体自主决策实现路径，是一种对不确定性更鲁棒的分工方式。
+
+- **Sprint 合约机制**：在每个 Sprint 开始前，Generator 与 Evaluator 先就"完成定义"达成协议，再开始编码。这一机制的必要性在于：
+
+  > 「The product spec was intentionally high-level, and I wanted a step to bridge the gap between user stories and testable implementation.」
+
+  合约通过文件传递（写→读→响应），既维持了智能体间的异步协调，又避免了上下文的直接共享污染。
+
+- **Evaluator 的调校成本**：评估者并非开箱即用——
+
+  > 「Out of the box, Claude is a poor QA agent. In early runs, I watched it identify legitimate issues, then talk itself into deciding they weren't a big deal and approve the work anyway.」
+
+  调校过程是：读取评估者 Log → 找出判断偏差案例 → 更新 Prompt → 循环多轮。这提示工程师：评估者本身也是需要迭代的工件，而非一劳永逸的配置。
+
+- **评估者的具体发现能力**（复古游戏制作器实验中的 Sprint 3，共 27 条标准）：
+
+  | 合约标准 | 评估者发现 |
+  |---------|---------|
+  | 矩形填充工具：拖拽填充矩形区域 | **失败** — 仅在拖拽起止点放置瓦片，`fillRectangle` 未在 mouseUp 时触发 |
+  | 用户可重排动画帧（API） | **失败** — `PUT /frames/reorder` 路由定义在 `/{frame_id}` 之后，FastAPI 将 'reorder' 解析为整数 frame_id，返回 422 |
+
+  评估者的发现粒度达到了具体函数和路由配置层面，远超"功能是否存在"的表面检查。
+
+**本节小结**：三智能体架构将"规格生成→功能实现→质量验证"三个环节解耦，Sprint 合约则在高层意图与具体实现之间建立了可追溯的桥梁。
+
+---
+
+### 五、实验结果：脚手架的价值边界
+
+**本节主旨**：本节通过复古游戏制作器的对比实验，量化了 Harness 的实际价值，并引出评估者"价值有条件"的核心结论。
+
+**展开内容**：
+
+- **Solo vs. 完整 Harness 的成本-质量权衡**：
+
+  | 方案 | 时长 | 成本 | 核心差异 |
+  |-----|-----|------|---------|
+  | Solo | 20 分钟 | $9 | 实体不响应输入，核心游戏功能损坏 |
+  | 完整 Harness | 6 小时 | $200 | 完整可玩，含动画、音效、AI 辅助生成 |
+
+  Solo 方案在外表上"看起来像一个游戏制作器"，但核心游戏循环（entity 对输入的响应）实际上是断裂的。Harness 方案的差异不在于外观，而在于可运行性。
+
+- **Planner 对范围的扩展效应**：同一个一句话提示，经 Planner 扩展为 16 特性、10 Sprint 的完整规格，包含精灵动画系统、音效音乐、AI 辅助关卡设计、分享链接等原始提示未曾提及的功能。Planner 的价值不仅是整理规格，更是主动扩大产品想象边界。
+
+- **评估者价值的条件性**：
+
+  > 「The evaluator is not a fixed yes-or-no decision. It is worth the cost when the task sits beyond what the current model does reliably solo.」
+
+  这一结论具有高度的普遍性——脚手架的价值不是绝对的，而是相对于"任务难度/模型当前能力"的比值动态变化的。
+
+**本节小结**：实验结果验证了 Harness 的实际增益，同时也为下一节"随模型进化减少脚手架"埋下了伏笔。
+
+---
+
+### 六、架构演化：随模型进化的假设更新
+
+**本节主旨**：本节是全文在工程哲学层面最有分量的部分，通过 Opus 4.6 上的迭代实验，论证了"定期审视 Harness 假设"是 AI 工程的核心实践之一。
+
+**展开内容**：
+
+- **移除 Sprint 结构的理据**：
+
+  > 「[Opus 4.6] plans more carefully, sustains agentic tasks for longer, can operate more reliably in larger codebases, and has better code review and debugging skills to catch its own mistakes.」
+
+  当模型原生能力提升到可以自主维持长任务连贯性时，为解决"上下文焦虑"而设计的 Sprint 分解结构便成为不必要的开销。
+
+- **DAW 实验的数据**：构建阶段连续运行 2 小时 7 分钟，无需 Sprint 分解，验证了 4.6 在长任务连贯性上的实质提升。
+
+  | 阶段 | 时长 | 成本 |
+  |-----|------|------|
+  | Planner | 4.7 分钟 | $0.46 |
+  | Build（第 1 轮） | 2 小时 7 分钟 | $71.08 |
+  | QA（第 1 轮） | 8.8 分钟 | $3.24 |
+  | Build（第 2 轮） | 1 小时 2 分钟 | $36.89 |
+  | QA（第 2 轮） | 6.8 分钟 | $3.09 |
+  | Build（第 3 轮） | 10.9 分钟 | $5.88 |
+  | QA（第 3 轮） | 9.6 分钟 | $4.06 |
+  | **合计** | **3 小时 50 分钟** | **$124.70** |
+
+- **评估者在 DAW 中仍捕获真实缺口**（第一轮 QA 反馈）：
+
+  > 「Several core DAW features are display-only without interactive depth: clips can't be dragged/moved on the timeline, there are no instrument UI panels, and no visual effect editors. These aren't edge cases — they're the core interactions that make a DAW usable.」
+
+  模型能力提升并未使评估者完全退场，只是将其从"逐 Sprint 把关"的密集角色，转变为"终态一次性审查"的检查点角色。
+
+- **核心工程原则**：
+
+  > 「Every component in a harness encodes an assumption about what the model can't do on its own, and those assumptions are worth stress testing, both because they may be incorrect, and because they can quickly go stale as models improve.」
+
+  这是本文最具迁移价值的论断——Harness 组件不是中性的工具，而是对模型能力边界的显式假设。假设可能从一开始就是错误的，也可能随模型迭代而过时。
+
+**本节小结**：架构演化的逻辑不是"新模型 = 更简单的 Harness"，而是"新模型 = 重新审视哪些假设仍然成立"。增加与删减组件的决策都应以实验为依据，而非凭直觉推断。
+
+---
+
+### 总结：核心主张与价值
+
+**作者核心主张**：通过生成-评估分离架构和动态 Harness 迭代，可以系统性地突破模型在复杂长任务中的质量天花板——但 Harness 设计本身必须随模型能力演进而持续重新校准。
+
+**为什么要这样做**：模型在长任务中存在上下文失调和自我评估偏差两个固有失效模式，单次提示或简单链式调用无法克服这两个问题。
+
+**具体是如何做的**：设计 Generator-Evaluator 双角色分离架构，将主观判断编码为具体标准，以 Sprint 合约机制将高层意图映射为可验证的实现行为，并通过多轮 Prompt 调校使评估者具备足够的审慎性。
+
+**这样做产生了什么结果**：在前端设计领域，迭代产出了人工难以通过单次提示获得的创意跳跃；在全栈编码领域，Harness 方案产出了功能完整的可运行应用，而等价成本的 Solo 方案核心功能损坏。
+
+**这对工程师、管理者和组织意味着什么**：对工程师而言，Harness 是一个需要持续维护的工件，而非一次性配置；每个组件都应对应一个可被验证的假设。对管理者而言，"模型升级"不是自动减少工程复杂度的魔法——它意味着重新分配工程投入，而非削减工程投入。对组织而言，AI 工程的竞争优势不在于使用最新模型，而在于快速识别和利用"有趣 Harness 组合"的工程敏锐度。
+
+---
+
+### 延伸思考
+
+1. **评估者的局限边界**：作者坦承评估者在深层嵌套特性上存在漏检，且音频质量评估对"无法听声音的模型"本质上是盲区。这提示：对于高度依赖人类感知（听觉、触觉、情感共鸣）的输出，评估者架构的替代方案或补充机制应当是什么？
+
+2. **合约协商的稳定性问题**：Sprint 合约由 Generator 与 Evaluator 自主协商，但两者都是 LLM——协商结果的可靠性和覆盖率本身是否需要外部验证？当两者就错误的"完成定义"达成共识时，Harness 是否有检测机制？
+
+3. **假设更新的系统化**：作者通过人工读取 log、逐组件对照实验来识别过时假设，这一过程高度依赖工程师经验。随着 Harness 复杂度增加，是否存在可以自动化"假设稳定性检测"的元评估层——即一个专门评估 Harness 组件必要性的上层 Agent？
